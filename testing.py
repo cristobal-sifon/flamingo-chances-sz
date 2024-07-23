@@ -10,6 +10,8 @@ from plottery.plotutils import savefig, update_rcParams
 from velociraptor import load
 from velociraptor.tools import get_full_label
 
+from flaminkit import parse_args
+
 update_rcParams()
 
 """Notes
@@ -150,35 +152,6 @@ def main():
     # with h5py.File(fpart) as f:
     #     comptony = np.array(f["BoundSubhaloProperties/"])
 
-
-def parse_args():
-    parser = ArgumentParser()
-    add = parser.add_argument
-    add("-b", "--box", default="L1000N1800")
-    add("-s", "--sim", default="HYDRO_FIDUCIAL")
-    add("-z", "--snapshot", default=77, type=int)
-    args = parser.parse_args()
-    # for now
-    args.path = dict(main=os.path.join(os.environ.get("FLAMINGO"), args.box, args.sim))
-    args.path["particles"] = os.path.join(
-        args.path.get("main"), "snapshots_downsampled"
-    )
-    args.path["SOAP-HBT"] = os.path.join(
-        "/cosma8/data/dp004/dc-foro1/HBT_SOAP",
-        args.box,
-        args.sim,
-        "SOAP_uncompressed",
-        "HBTplus",
-    )
-    args.path["SOAP-VR"] = os.path.join(args.path.get("main"), "SOAP")
-    if args.snapshot is not None:
-        args.path["snapshot"] = os.path.join(
-            args.path.get("main"), "snapshots", f"flamingo_{args.snapshot:04d}"
-        )
-        args.snapshot_file = os.path.join(
-            args.path.get("snapshot"), f"flamingo_{args.snapshot:04d}.hdf5"
-        )
-    return args
 
 
 if __name__ == "__main__":

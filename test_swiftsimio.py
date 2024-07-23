@@ -4,7 +4,6 @@ from matplotlib import pyplot as plt
 import numpy as np
 import os
 import pandas as pd
-from scipy.integrate import trapezoid
 import swiftsimio as sw
 from time import time
 import unyt
@@ -12,14 +11,26 @@ from unyt import Mpc
 
 from plottery.plotutils import savefig, update_rcParams
 
-from testing import parse_args
-import flamingo_tools as ftools
+import flaminkit as fkit
 
 update_rcParams()
+pd.options.display.float_format = "{:.3e}".format
 
 
 def main():
-    args = parse_args()
+    args = fkit.parse_args(
+        [
+            (
+                "-n",
+                dict(
+                    dest="number",
+                    default=None,
+                    type=int,
+                    help="Number of clusters (for quick runs)",
+                ),
+            )
+        ]
+    )
 
     ## metadata
     part = sw.load(args.snapshot_file)
@@ -44,13 +55,22 @@ def main():
                 if gr[0] in ("HBTplus", "200_crit", "100kpc"):
                     for i, subgr in enumerate(gr[1].items()):
                         ic(subgr)
+                        if subgr[0] in ("projx",):
+                            for i, subsubgr in enumerate(subgr[1].items()):
+                                ic(subsubgr)
             print()
 
     # Load cluster galaxies for 10 random clusters
-    cluster_galaxies = ftools.galaxies_in_clusters(
-        halofile, cluster_mass_min=1e14, n=3, so_cols="ComptonY", random_seed=1
+    cluster_galaxies = fkit.subhalos_in_clusters(
+        halofile,
+        cluster_mass_min=1e14,
+        n=args.number,
+        so_cols="ComptonY",
+        subhalo_mask={"StellarMass": (1e10, np.inf)},
+        random_seed=1,
     )
     ic(cluster_galaxies)
+    main_clusters = cluster_galaxies.loc[cluster_galaxies["Rank"] == 0]
 
     # cut in stellar mass (first add stellar mass and center of
     # mass which we will use below)
@@ -62,71 +82,31 @@ def main():
                 "GasMass": file.get("BoundSubhaloProperties/GasMass")[()],
             }
         )
-        com = file.get("BoundSubhaloProperties/CentreOfMass")
-        for i, coord in enumerate("xyz"):
-            gals[coord] = com[:, i]
         cluster_galaxies = gals.merge(cluster_galaxies, on="TrackId", how="right")
         del gals
     ic(cluster_galaxies)
-    cluster_galaxies = cluster_galaxies.loc[cluster_galaxies["StellarMass"] > 1e10]
-    ic(cluster_galaxies)
 
     # find particles associated with each selected cluster galaxy
-    mask = sw.mask(args.snapshot_file)
-    dmax = 0.1 * Mpc
     xyz = cluster_galaxies[["x", "y", "z"]].to_numpy() * Mpc
-    ic(dmax, xyz)
+    dmax = 0.1 * Mpc
     ti = time()
-    regions = (
-        np.transpose(
-            [[xyz[:, i] - dmax, xyz[:, i] + dmax] for i in range(xyz.shape[1])],
-            axes=(2, 0, 1),
-        )
-        * Mpc
+    gas_particles, gas_particles_around = fkit.particles_around(
+        args.snapshot_file, xyz, dmax, "gas"
     )
     tf = time()
-    ic(regions, regions.shape, tf - ti)
-    mask.constrain_spatial(regions[0])
-    particles_test = sw.load(args.snapshot_file, mask=mask)
-    ic(particles_test.gas.masses.shape)
-    for region in regions[1:]:
-        mask.constrain_spatial(region, intersect=True)
-    particles = sw.load(args.snapshot_file, mask=mask)
-    # are the particles sorted following the masks?
-    ic(
-        particles.gas.coordinates.shape,
-        particles.gas.masses.shape,
-        particles.gas.temperatures.shape,
+    ic(gas_particles, tf - ti)
+    # must make an array to get floats, otherwise I get object
+    cluster_galaxies["ComptonYSpherical"] = np.array(
+        [gas_particles.compton_yparameters[p].sum() for p in gas_particles_around]
     )
-    # match particles to galaxies
-    rng_gas = np.arange(particles.gas.masses.size, dtype=int)
-    ti = time()
-    matching_particles = [
-        rng_gas[((particles.gas.coordinates - xyz_i) ** 2).sum(axis=1) ** 0.5 < dmax]
-        for xyz_i in xyz
-    ]
-    tf = time()
-    ic(tf - ti)
-    y_tot = np.zeros(len(cluster_galaxies))
-    for i, p in enumerate(matching_particles):
-        y_tot[i] = particles.gas.compton_yparameters[p].sum()
-        # if cluster_galaxies["GasMass"].iloc[i] > 0:
-        if i % 100 == 0:
-            ic(
-                i,
-                cluster_galaxies[["GasMass", "x", "y", "z"]].iloc[i],
-                p,
-                particles.gas.coordinates[p],
-                y_tot[i],
-            )
-    cluster_galaxies["ComptonY"] = y_tot
-    ic(cluster_galaxies[["GasMass", "StellarMass", "ComptonY"]])
+    ic(cluster_galaxies[["GasMass", "StellarMass", "ComptonYSpherical"]])
+    ic(cluster_galaxies.dtypes)
     ic((cluster_galaxies["GasMass"] > 0).sum())
 
     # find infalling groups
     ti = time()
-    main_clusters, infallers = ftools.infalling_groups(
-        halofile, cluster_mass_min=1e14, group_mass_min=1e13
+    main_clusters, infallers = fkit.infalling_groups(
+        halofile, clusters=main_clusters, group_mass_min=1e13, random_seed=9
     )
     tf = time()
     ic(
@@ -135,11 +115,59 @@ def main():
         tf - ti,
     )
     ti = time()
-    galaxies_in_infallers = ftools.galaxies_in_clusters(halofile, clusters=infallers)
+    galaxies_in_infallers = fkit.subhalos_in_clusters(
+        halofile,
+        clusters=infallers,
+        subhalo_cols=["StellarMass"],
+        subhalo_mask={"StellarMass": (1e10, np.inf)},
+        random_seed=9,
+    )
+    galaxies_in_infallers = galaxies_in_infallers.loc[
+        galaxies_in_infallers["StellarMass"] > 1e10
+    ]
     tf = time()
     ic(galaxies_in_infallers, tf - ti)
+    ti = time()
+    infaller_gas_particles, infaller_gas_particles_around = fkit.particles_around(
+        args.snapshot_file,
+        galaxies_in_infallers[["x", "y", "z"]].to_numpy() * Mpc,
+        dmax,
+        "gas",
+    )
+    tf = time()
+    ic(infaller_gas_particles, tf - ti)
+    galaxies_in_infallers["ComptonYSpherical"] = np.array(
+        [
+            infaller_gas_particles.compton_yparameters[p].sum()
+            for p in infaller_gas_particles_around
+        ]
+    )
+    ic(galaxies_in_infallers, tf - ti)
+    ic(galaxies_in_infallers.dtypes)
 
-    
+    # plot compton y vs stellar mass or distance to main or something
+    fig, ax = plt.subplots(layout="constrained")
+    mbins = np.logspace(10, 13, 20)
+    ybins = np.logspace(-11, -5, 20)
+    h2d_infall = np.histogram2d(
+        galaxies_in_infallers["ComptonYSpherical"],
+        galaxies_in_infallers["StellarMass"],
+        (ybins, mbins),
+    )[0]
+    h2d_main = np.histogram2d(
+        cluster_galaxies["ComptonYSpherical"],
+        cluster_galaxies["StellarMass"],
+        (ybins, mbins),
+    )[0]
+    # remember this doesn't work for log axes, use pcolormesh instead
+    ax.pcolormesh(mbins, ybins, h2d_infall, cmap="BuPu")
+    y0 = 10 ** ((np.log10(ybins[1:]) + np.log10(ybins[:-1])) / 2)
+    m0 = 10 ** ((np.log10(mbins[1:]) + np.log10(mbins[:-1])) / 2)
+    ax.contour(m0, y0, h2d_main, colors="k")
+    ax.set(xscale="log", yscale="log", xlabel="stellar mass", ylabel="Compton Y")
+    output = "plots/testing/mstar_y_infallers.png"
+    savefig(output, fig=fig, tight=False)
+
     return
 
 

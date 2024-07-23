@@ -1,6 +1,8 @@
 *.DS_Store
 *~
+._*
 *.pyc
+*.save
 
 __pycache__
 
