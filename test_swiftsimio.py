@@ -1,13 +1,16 @@
 import h5py
 from icecream import ic
 from matplotlib import pyplot as plt
+from matplotlib.colors import LogNorm
 import numpy as np
 import os
 import pandas as pd
+from scipy.stats import binned_statistic
 import swiftsimio as sw
 from time import time
 import unyt
 from unyt import Mpc
+import sys
 
 from plottery.plotutils import savefig, update_rcParams
 
@@ -60,10 +63,10 @@ def main():
                                 ic(subsubgr)
             print()
 
-    # Load cluster galaxies for 10 random clusters
+    ## Load cluster galaxies for n random clusters
     cluster_galaxies = fkit.subhalos_in_clusters(
         halofile,
-        cluster_mass_min=1e14,
+        cluster_mass_min=1e15,
         n=args.number,
         so_cols="ComptonY",
         subhalo_mask={"StellarMass": (1e10, np.inf)},
@@ -71,7 +74,17 @@ def main():
     )
     ic(cluster_galaxies)
     main_clusters = cluster_galaxies.loc[cluster_galaxies["Rank"] == 0]
-
+    # find infalling groups
+    ti = time()
+    main_clusters, infallers = fkit.infalling_groups(
+        halofile, clusters=main_clusters, group_mass_min=1e13, random_seed=9
+    )
+    tf = time()
+    ic(
+        main_clusters,
+        infallers,
+        tf - ti,
+    )
     # cut in stellar mass (first add stellar mass and center of
     # mass which we will use below)
     with h5py.File(halofile) as file:
@@ -85,19 +98,136 @@ def main():
         cluster_galaxies = gals.merge(cluster_galaxies, on="TrackId", how="right")
         del gals
     ic(cluster_galaxies)
-
     # find particles associated with each selected cluster galaxy
     xyz = cluster_galaxies[["x", "y", "z"]].to_numpy() * Mpc
     dmax = 0.1 * Mpc
     ti = time()
-    gas_particles, gas_particles_around = fkit.particles_around(
-        args.snapshot_file, xyz, dmax, "gas"
+    (gas_particles, star_particles), (gas_particles_mask, star_particles_mask) = (
+        fkit.particles_around(args.snapshot_file, xyz, dmax, ["gas", "stars"])
     )
     tf = time()
-    ic(gas_particles, tf - ti)
+
+    ## Load galaxies in infalling groups around those clusters
+    # not using for now
+    # ti = time()
+    # galaxies_in_infallers = fkit.subhalos_in_clusters(
+    #     halofile,
+    #     clusters=infallers,
+    #     subhalo_cols=["StellarMass"],
+    #     subhalo_mask={"StellarMass": (1e10, np.inf)},
+    #     random_seed=9,
+    # )
+    # galaxies_in_infallers = galaxies_in_infallers.loc[
+    #     galaxies_in_infallers["StellarMass"] > 1e10
+    # ]
+    # tf = time()
+    # ic(galaxies_in_infallers, tf - ti)
+    # (infaller_gas_particles, infaller_star_particles), (
+    #     infaller_gas_particles_mask,
+    #     infaller_star_particles_mask,
+    # ) = fkit.particles_around(
+    #     args.snapshot_file,
+    #     galaxies_in_infallers[["x", "y", "z"]].to_numpy() * Mpc,
+    #     dmax,
+    #     ["gas", "stars"],
+    # )
+
+    ic(tf - ti, gas_particles)
+    ic(star_particles.luminosities, gas_particles.electron_number_densities)
+    for i in range(3):
+        cluster_galaxies[f"MeanGasVelocity{i}"] = fkit.subhalo_particle_statistic(
+            gas_particles.velocities[:, i], gas_particles_mask, np.average
+        )
+        cluster_galaxies[f"MeanStarsVelocity{i}"] = fkit.subhalo_particle_statistic(
+            star_particles.velocities[:, i], star_particles_mask, np.average
+        )
+        cluster_galaxies[f"eDensityWeightedGasVelocity{i}"] = (
+            fkit.subhalo_particle_statistic(
+                gas_particles.velocities[:, i],
+                gas_particles_mask,
+                np.average,
+                weights=gas_particles.electron_number_densities.ndarray_view(),
+            )
+        )
+        cluster_galaxies[f"LuminosityWeightedStarsVelocity{i}"] = (
+            fkit.subhalo_particle_statistic(
+                star_particles.velocities[:, i],
+                star_particles_mask,
+                np.average,
+                weights=star_particles.luminosities.GAMA_r.ndarray_view(),
+            )
+        )
+        # # load same columns for galaxies in infallinng groups
+        # galaxies_in_infallers[f"MeanGasVelocity{i}"] = fkit.subhalo_particle_statistic(
+        #     infaller_gas_particles.velocities[:, i],
+        #     infaller_gas_particles_mask,
+        #     np.average,
+        # )
+        # galaxies_in_infallers[f"MeanStarsVelocity{i}"] = (
+        #     fkit.subhalo_particle_statistic(
+        #         infaller_star_particles.velocities[:, i],
+        #         infaller_star_particles_mask,
+        #         np.average,
+        #     )
+        # )
+        # galaxies_in_infallers[f"eDensityWeightedGasVelocity{i}"] = (
+        #     fkit.subhalo_particle_statistic(
+        #         infaller_gas_particles.velocities[:, i],
+        #         infaller_gas_particles_mask,
+        #         np.average,
+        #         weights=infaller_gas_particles.electron_number_densities.ndarray_view(),
+        #     )
+        # )
+        # galaxies_in_infallers[f"LuminosityWeightedStarsVelocity{i}"] = (
+        #     fkit.subhalo_particle_statistic(
+        #         infaller_star_particles.velocities[:, i],
+        #         infaller_star_particles_mask,
+        #         np.average,
+        #         weights=infaller_star_particles.luminosities.GAMA_r.ndarray_view(),
+        #     )
+        # )
+    ic(
+        cluster_galaxies[
+            [
+                "GasMass",
+                "StellarMass",
+                "MeanGasVelocity0",
+                "eDensityWeightedGasVelocity0",
+            ]
+        ],
+    )
+    ic(cluster_galaxies.dtypes)
+    ic(
+        cluster_galaxies[
+            ["LuminosityWeightedStarsVelocity0", "eDensityWeightedGasVelocity0"]
+        ].describe()
+    )
+
+    # maybe I can use galaxy_scalings.plot for this - should move that to fkit
+    # vbins = np.logspace(1, 4, 41)
+    vbins = np.linspace(-2000, 2000, 51)
+    hist2d = np.histogram2d(
+        cluster_galaxies["LuminosityWeightedStarsVelocity0"],
+        cluster_galaxies["eDensityWeightedGasVelocity0"],
+        vbins,
+    )[0]
+    fig, ax = plt.subplots(figsize=(8, 6), layout="constrained")
+    im = ax.pcolormesh(vbins, vbins, hist2d.T, cmap="magma_r", norm=LogNorm())
+    plt.colorbar(im, ax=ax)
+    ax.plot(vbins, vbins, "k-", lw=2)
+    ax.set(
+        xlabel="LuminosityWeightedStarsVelocity0",
+        ylabel="eDensityWeightedGasVelocity0",
+        # xscale="log",
+        # yscale="log",
+    )
+    output = "plots/testing/vstars_vgas.png"
+    savefig(output, fig=fig, tight=False)
+    return
+
     # must make an array to get floats, otherwise I get object
     cluster_galaxies["ComptonYSpherical"] = np.array(
-        [gas_particles.compton_yparameters[p].sum() for p in gas_particles_around]
+        [gas_particles.compton_yparameters[p].sum() for p in gas_particles_mask]
     )
     ic(cluster_galaxies[["GasMass", "StellarMass", "ComptonYSpherical"]])
     ic(cluster_galaxies.dtypes)
@@ -115,31 +245,36 @@ def main():
         tf - ti,
     )
     ti = time()
-    galaxies_in_infallers = fkit.subhalos_in_clusters(
-        halofile,
-        clusters=infallers,
-        subhalo_cols=["StellarMass"],
-        subhalo_mask={"StellarMass": (1e10, np.inf)},
-        random_seed=9,
-    )
-    galaxies_in_infallers = galaxies_in_infallers.loc[
-        galaxies_in_infallers["StellarMass"] > 1e10
-    ]
-    tf = time()
-    ic(galaxies_in_infallers, tf - ti)
-    ti = time()
-    infaller_gas_particles, infaller_gas_particles_around = fkit.particles_around(
+    infaller_gas_particles, infaller_gas_particles_mask = fkit.particles_around(
         args.snapshot_file,
         galaxies_in_infallers[["x", "y", "z"]].to_numpy() * Mpc,
         dmax,
-        "gas",
+        ["gas", "stars"],
     )
     tf = time()
+    ic(
+        tf - ti,
+        galaxies_[["GasMass", "StellarMass", "GasVelocities0", "GasVelocities1"]],
+    )
+    ti = time()
+    # gv = [gas_particles.velocities[p] for p in gas_particles_mask]
+    for i in range(3):
+        cluster_galaxies[f"GasVelocities{i}"] = []
+        for p in gas_particles_mask:
+            gv = gas_particles.velocities[p]
+            cluster_galaxies[f"GasVelocities{i}"].extend(gv[:, i])
+    tf = time()
+    ic(
+        tf - ti,
+        cluster_galaxies[
+            ["GasMass", "StellarMass", "GasVelocities0", "GasVelocities1"]
+        ],
+    )
     ic(infaller_gas_particles, tf - ti)
     galaxies_in_infallers["ComptonYSpherical"] = np.array(
         [
             infaller_gas_particles.compton_yparameters[p].sum()
-            for p in infaller_gas_particles_around
+            for p in infaller_gas_particles_mask
         ]
     )
     ic(galaxies_in_infallers, tf - ti)
